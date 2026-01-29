@@ -6,41 +6,106 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MASTER_ID = Number(process.env.MASTER_ID);
+// === НАСТРОЙКИ ===
+const BOT_TOKEN = process.env.BOT_TOKEN;      // токен от BotFather
+const MASTER_ID = Number(process.env.MASTER_ID); // твой Telegram ID
 
+// Хранилище заказов (MVP)
 let ORDERS = [];
 
-async function notifyMaster(text){
-  if(!BOT_TOKEN||!MASTER_ID)return;
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,{
-    method:"POST",
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({chat_id:MASTER_ID,text})
+// === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+function formatOrderMessage(order) {
+  const a = order.answers;
+  const guest = order.guest;
+
+  return [
+    "🕯 НОВЫЙ ЗАКАЗ",
+    "",
+    `Гость: ${guest.name}${guest.username ? " (@" + guest.username + ")" : ""}`,
+    "",
+    `Цвет: ${a.color}`,
+    `Ощущение: ${a.mouthfeel}`,
+    `Пауза: ${a.pause}`,
+    `Скорость: ${a.speed}`,
+    `Пространство: ${a.space}`,
+    `Момент: ${a.moment}`,
+    "",
+    "⏱ Кальян готовится ~25 минут"
+  ].join("\n");
+}
+
+async function notifyMaster(text) {
+  if (!BOT_TOKEN || !MASTER_ID) return;
+
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: MASTER_ID,
+      text
+    })
   });
 }
 
-app.get("/",(_,res)=>res.send("OK"));
+// === API ===
+app.get("/", (req, res) => res.send("OK"));
 
-app.post("/order",async(req,res)=>{
-  const o=req.body;
-  if(!o?.id)return res.status(400).json({ok:false});
-  ORDERS.push(o);
-  notifyMaster("🕯 Новый заказ от "+o.guest.name);
-  res.json({ok:true});
+// Создание заказа
+app.post("/order", async (req, res) => {
+  const order = req.body;
+
+  if (!order || !order.id || !order.answers || !order.guest) {
+    return res.status(400).json({ ok: false, error: "bad_order" });
+  }
+
+  // статус по умолчанию
+  if (!order.status) order.status = "accepted";
+
+  ORDERS.push(order);
+
+  // Ограничим память
+  if (ORDERS.length > 200) ORDERS = ORDERS.slice(-200);
+
+  // Уведомляем мастера
+  try {
+    const message = formatOrderMessage(order);
+    await notifyMaster(message);
+  } catch (e) {
+    console.error("Telegram notify error", e);
+  }
+
+  res.json({ ok: true });
 });
 
-app.get("/orders",(req,res)=>{
-  res.json({ok:true,orders:ORDERS});
+// Получение заказов
+app.get("/orders", (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 50), 200);
+  res.json({
+    ok: true,
+    orders: ORDERS.slice(-limit)
+  });
 });
 
-app.patch("/order/:id/status",(req,res)=>{
-  const {id}=req.params;
-  const {status}=req.body;
-  const o=ORDERS.find(o=>o.id===id);
-  if(!o)return res.status(404).json({ok:false});
-  o.status=status;
-  res.json({ok:true});
+// Смена статуса заказа (id — строка!)
+app.patch("/order/:id/status", async (req, res) => {
+  const id = String(req.params.id);
+  const { status } = req.body || {};
+
+  if (!id || !status) {
+    return res.status(400).json({ ok: false, error: "bad_request" });
+  }
+
+  const idx = ORDERS.findIndex(o => String(o.id) === id);
+  if (idx === -1) {
+    return res.status(404).json({ ok: false, error: "not_found" });
+  }
+
+  ORDERS[idx].status = status;
+  res.json({ ok: true, order: ORDERS[idx] });
 });
 
-app.listen(process.env.PORT||3000);
+// === СТАРТ ===
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("Server started on port", PORT);
+});
