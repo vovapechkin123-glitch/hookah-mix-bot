@@ -10,12 +10,11 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MASTER_ID = Number(process.env.MASTER_ID || "0");
 
-// storage (MVP)
+// MVP storage
 let MOMENTS = [];
 
-function now() {
-  return Date.now();
-}
+// helpers
+const now = () => Date.now();
 
 function escapeText(s = "") {
   return String(s).replaceAll("<", "").replaceAll(">", "");
@@ -28,21 +27,18 @@ function formatMomentMessage(m) {
   const lines = [
     "🕯 НОВЫЙ МОМЕНТ",
     "",
-    `Гость: ${g.name || "Гость"}${g.username ? " (@" + g.username + ")" : ""}`,
+    `Гость: ${escapeText(g.name || "Гость")}${g.username ? " (@" + escapeText(g.username) + ")" : ""}`,
     "",
-    `q1: ${a[1] || "—"}`,
-    `q2: ${a[2] || "—"}`,
-    `q3: ${a[3] || "—"}`,
-    `q4: ${a[4] || "—"}`,
-    `q5: ${a[5] || "—"}`,
-    `q6: ${a[6] || "—"}`,
-    `q7: ${a[7] || "—"}`,
-    `q8: ${a[8] || "—"}`,
-    `q9: ${a[9] || "—"}`,
-    `q10 (нельзя): ${a[10] || "—"}`,
-    `q11: ${a[11] || "—"}`,
+    `q1: ${escapeText(a["1"] || a[1] || "—")}`,
+    `q2: ${escapeText(a["2"] || a[2] || "—")}`,
+    `q3: ${escapeText(a["3"] || a[3] || "—")}`,
+    `q4: ${escapeText(a["4"] || a[4] || "—")}`,
+    `q5: ${escapeText(a["5"] || a[5] || "—")}`,
+    `q6: ${escapeText(a["6"] || a[6] || "—")}`,
+    `q7 (нельзя): ${escapeText(a["7"] || a[7] || "—")}`,
+    `q8: ${escapeText(a["8"] || a[8] || "—")}`,
     "",
-    `Эпитет: ${m.epithet || "—"}`,
+    `Эпитет: ${escapeText(m.epithet || "—")}`,
     "",
     "⏳ Время начнётся, когда кухня подтвердит."
   ];
@@ -67,6 +63,7 @@ async function notifyMaster(text) {
   }
 }
 
+// routes
 app.get("/", (req, res) => res.send("OK"));
 
 // create moment
@@ -77,28 +74,27 @@ app.post("/moment", async (req, res) => {
     return res.status(400).json({ ok: false, error: "bad_moment" });
   }
 
-  // normalize
   const moment = {
     id: String(m.id),
     createdAt: Number(m.createdAt || now()),
     status: String(m.status || "new"),
+    acceptedAt: m.acceptedAt ? Number(m.acceptedAt) : null,
+    rating: m.rating || null,
+    epithet: String(m.epithet || ""),
     guest: {
       id: m.guest.id,
-      name: m.guest.name || "Гость",
-      username: m.guest.username || ""
+      name: String(m.guest.name || "Гость"),
+      username: String(m.guest.username || "")
     },
-    answers: m.answers || {},
-    epithet: m.epithet || "",
-    rating: m.rating || null,
-    acceptedAt: m.acceptedAt || null
+    answers: m.answers || {}
   };
 
   MOMENTS.push(moment);
 
   // limit memory
-  if (MOMENTS.length > 400) MOMENTS = MOMENTS.slice(-400);
+  if (MOMENTS.length > 500) MOMENTS = MOMENTS.slice(-500);
 
-  // notify
+  // notify master
   await notifyMaster(formatMomentMessage(moment));
 
   res.json({ ok: true, moment });
@@ -106,11 +102,11 @@ app.post("/moment", async (req, res) => {
 
 // get moments
 app.get("/moments", (req, res) => {
-  const limit = Math.min(Number(req.query.limit || 50), 400);
+  const limit = Math.min(Number(req.query.limit || 50), 500);
   res.json({ ok: true, moments: MOMENTS.slice(-limit) });
 });
 
-// set status
+// set status (accepted starts the sand)
 app.patch("/moment/:id/status", (req, res) => {
   const id = String(req.params.id);
   const { status } = req.body || {};
@@ -119,14 +115,13 @@ app.patch("/moment/:id/status", (req, res) => {
     return res.status(400).json({ ok: false, error: "bad_request" });
   }
 
-  const idx = MOMENTS.findIndex((m) => String(m.id) === id);
+  const idx = MOMENTS.findIndex(m => String(m.id) === id);
   if (idx === -1) return res.status(404).json({ ok: false, error: "not_found" });
 
   const next = String(status);
-
   MOMENTS[idx].status = next;
 
-  // IMPORTANT: timer starts when kitchen accepts
+  // IMPORTANT: start timer when accepted
   if (next === "accepted" && !MOMENTS[idx].acceptedAt) {
     MOMENTS[idx].acceptedAt = now();
   }
@@ -143,15 +138,12 @@ app.patch("/moment/:id/rating", (req, res) => {
     return res.status(400).json({ ok: false, error: "bad_request" });
   }
 
-  const idx = MOMENTS.findIndex((m) => String(m.id) === id);
+  const idx = MOMENTS.findIndex(m => String(m.id) === id);
   if (idx === -1) return res.status(404).json({ ok: false, error: "not_found" });
 
   MOMENTS[idx].rating = String(rating);
-
   res.json({ ok: true, moment: MOMENTS[idx] });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Server started on port", PORT);
-});
+app.listen(PORT, () => console.log("Server started on port", PORT));
