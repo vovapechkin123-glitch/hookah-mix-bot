@@ -7,26 +7,22 @@ app.use(cors());
 app.use(express.json());
 
 // === НАСТРОЙКИ ===
-const BOT_TOKEN = process.env.BOT_TOKEN; // токен BotFather
-const MASTER_ID = Number(process.env.MASTER_ID || 0); // твой Telegram ID
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MASTER_ID = Number(process.env.MASTER_ID || 1292778768);
 
 // === ХРАНИЛИЩЕ (MVP / RAM) ===
 let MOMENTS = [];
 
 /**
- * Сессии гео-допуска (fallback для iPhone)
  * userId -> { allowed: boolean, updatedAt: number }
  */
 const GEO_SESSIONS = new Map();
 
-// === ВСПОМОГАТЕЛЬНОЕ ===
+// === UTILS ===
 function toRad(x) {
   return (x * Math.PI) / 180;
 }
 
-/**
- * Haversine distance in meters
- */
 function distanceMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const dLat = toRad(lat2 - lat1);
@@ -43,12 +39,13 @@ function distanceMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+function fmt(v) {
+  return Array.isArray(v) ? v.join(", ") : (v ?? "—");
+}
+
 function formatMomentMessage(moment) {
   const g = moment.guest || {};
   const a = moment.answers || {};
-
-  // ответы могут быть массивом (q6)
-  const fmt = (v) => Array.isArray(v) ? v.join(", ") : (v ?? "—");
 
   return [
     "🕯 НОВЫЙ МОМЕНТ",
@@ -65,7 +62,7 @@ function formatMomentMessage(moment) {
     "",
     `Эпитет: ${moment.epithet || "—"}`,
     "",
-    "⏱ Процесс ~25 минут"
+    "⏱ Время начнётся, когда кухня подтвердит."
   ].join("\n");
 }
 
@@ -87,7 +84,6 @@ app.get("/", (req, res) => res.send("OK"));
 
 /**
  * POST /geo/check
- * body: { lat, lng, venue: { lat, lng, radius } }
  */
 app.post("/geo/check", (req, res) => {
   const { lat, lng, venue } = req.body || {};
@@ -116,7 +112,6 @@ app.post("/geo/check", (req, res) => {
 
 /**
  * GET /geo/session?userId=123
- * fallback если браузер не отдаёт гео
  */
 app.get("/geo/session", (req, res) => {
   const userId = String(req.query.userId || "");
@@ -125,7 +120,6 @@ app.get("/geo/session", (req, res) => {
   const s = GEO_SESSIONS.get(userId);
   if (!s) return res.json({ ok: true, allowed: false });
 
-  // TTL 2 часа на сервере (можно менять)
   const TTL = 2 * 60 * 60 * 1000;
   const alive = Date.now() - s.updatedAt < TTL;
 
@@ -133,11 +127,7 @@ app.get("/geo/session", (req, res) => {
 });
 
 /**
- * (На будущее) POST /geo/session/allow
- * Позволяет мастеру/боту открыть доступ гостю по userId
- * body: { userId, allowed }
- *
- * Сейчас можно дергать руками для теста (Postman)
+ * POST /geo/session/allow
  */
 app.post("/geo/session/allow", (req, res) => {
   const { userId, allowed } = req.body || {};
@@ -153,7 +143,6 @@ app.post("/geo/session/allow", (req, res) => {
 
 /**
  * POST /moment
- * Создание момента
  */
 app.post("/moment", async (req, res) => {
   const moment = req.body;
@@ -162,15 +151,16 @@ app.post("/moment", async (req, res) => {
     return res.status(400).json({ ok: false, error: "bad_moment" });
   }
 
-  if (!moment.status) moment.status = "active";
   if (!moment.createdAt) moment.createdAt = Date.now();
+
+  // новый момент всегда "created"
+  moment.status = "created";
+  moment.acceptedAt = null;
 
   MOMENTS.push(moment);
 
-  // ограничение памяти
   if (MOMENTS.length > 300) MOMENTS = MOMENTS.slice(-300);
 
-  // уведомляем мастера
   try {
     const msg = formatMomentMessage(moment);
     await notifyMaster(msg);
@@ -193,8 +183,21 @@ app.get("/moments", (req, res) => {
 });
 
 /**
+ * GET /moment/:id
+ */
+app.get("/moment/:id", (req, res) => {
+  const id = String(req.params.id || "");
+  const m = MOMENTS.find(x => String(x.id) === id);
+  if (!m) return res.status(404).json({ ok: false, error: "not_found" });
+  res.json({ ok: true, moment: m });
+});
+
+/**
  * PATCH /moment/:id/status
  * body: { status }
+ *
+ * status values:
+ * created -> accepted -> cooking -> serving -> done
  */
 app.patch("/moment/:id/status", (req, res) => {
   const id = String(req.params.id || "");
@@ -209,11 +212,19 @@ app.patch("/moment/:id/status", (req, res) => {
     return res.status(404).json({ ok: false, error: "not_found" });
   }
 
+  const prev = MOMENTS[idx].status;
+
   MOMENTS[idx].status = status;
-  res.json({ ok: true, moment: MOMENTS[idx] });
+
+  // таймер гостя стартует только при accepted
+  if (status === "accepted" && !MOMENTS[idx].acceptedAt) {
+    MOMENTS[idx].acceptedAt = Date.now();
+  }
+
+  res.json({ ok: true, prev, moment: MOMENTS[idx] });
 });
 
-// === СТАРТ ===
+// === START ===
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server started on port", PORT);
