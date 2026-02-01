@@ -1,149 +1,214 @@
-import express from "express";
-import cors from "cors";
-import fetch from "node-fetch";
+const express = require("express");
+const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
-// ENV
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MASTER_ID = Number(process.env.MASTER_ID || "0");
+/* =========================
+   CONFIG
+   ========================= */
+const PORT = process.env.PORT || 3000;
+const DATA_FILE = path.join(__dirname, "moments.json");
 
-// MVP storage
-let MOMENTS = [];
+const MAX_LIMIT = 500;
 
-// helpers
-const now = () => Date.now();
+const ALLOWED_STATUS = new Set([
+  "new",
+  "accepted",
+  "in_progress",
+  "serving",
+  "finished"
+]);
 
-function escapeText(s = "") {
-  return String(s).replaceAll("<", "").replaceAll(">", "");
-}
+const ALLOWED_RATING = new Set([
+  "bad",
+  "ok",
+  "perfect"
+]);
 
-function formatMomentMessage(m) {
-  const g = m.guest || {};
-  const a = m.answers || {};
+/* =========================
+   MIDDLEWARE
+   ========================= */
+app.use(express.json({ limit: "1mb" }));
 
-  const lines = [
-    "🕯 НОВЫЙ МОМЕНТ",
-    "",
-    `Гость: ${escapeText(g.name || "Гость")}${g.username ? " (@" + escapeText(g.username) + ")" : ""}`,
-    "",
-    `q1: ${escapeText(a["1"] || a[1] || "—")}`,
-    `q2: ${escapeText(a["2"] || a[2] || "—")}`,
-    `q3: ${escapeText(a["3"] || a[3] || "—")}`,
-    `q4: ${escapeText(a["4"] || a[4] || "—")}`,
-    `q5: ${escapeText(a["5"] || a[5] || "—")}`,
-    `q6: ${escapeText(a["6"] || a[6] || "—")}`,
-    `q7 (нельзя): ${escapeText(a["7"] || a[7] || "—")}`,
-    `q8: ${escapeText(a["8"] || a[8] || "—")}`,
-    "",
-    `Эпитет: ${escapeText(m.epithet || "—")}`,
-    "",
-    "⏳ Время начнётся, когда кухня подтвердит."
-  ];
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+  })
+);
 
-  return lines.join("\n");
-}
+/* =========================
+   STORAGE
+   ========================= */
+let moments = [];
 
-async function notifyMaster(text) {
-  if (!BOT_TOKEN || !MASTER_ID) return;
-
+function readFileSafe() {
   try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: MASTER_ID,
-        text: escapeText(text)
-      })
-    });
+    if (!fs.existsSync(DATA_FILE)) {
+      fs.writeFileSync(DATA_FILE, JSON.stringify({ moments: [] }, null, 2), "utf-8");
+      return { moments: [] };
+    }
+    const raw = fs.readFileSync(DATA_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.moments)) return { moments: [] };
+    return parsed;
   } catch (e) {
-    console.error("Telegram notify error:", e);
+    return { moments: [] };
   }
 }
 
-// routes
-app.get("/", (req, res) => res.send("OK"));
-
-// create moment
-app.post("/moment", async (req, res) => {
-  const m = req.body;
-
-  if (!m || !m.id || !m.guest || !m.answers) {
-    return res.status(400).json({ ok: false, error: "bad_moment" });
+function writeFileSafe() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ moments }, null, 2), "utf-8");
+    return true;
+  } catch (e) {
+    return false;
   }
+}
 
-  const moment = {
-    id: String(m.id),
-    createdAt: Number(m.createdAt || now()),
+function initStorage() {
+  const data = readFileSafe();
+  moments = data.moments || [];
+  if (!Array.isArray(moments)) moments = [];
+}
+initStorage();
+
+function normalizeMoment(m) {
+  const now = Date.now();
+  return {
+    id: String(m.id || `${now}_${Math.random().toString(36).slice(2, 8)}`),
+    createdAt: Number(m.createdAt || now),
     status: String(m.status || "new"),
     acceptedAt: m.acceptedAt ? Number(m.acceptedAt) : null,
-    rating: m.rating || null,
-    epithet: String(m.epithet || ""),
-    guest: {
-      id: m.guest.id,
-      name: String(m.guest.name || "Гость"),
-      username: String(m.guest.username || "")
-    },
+    rating: m.rating ? String(m.rating) : null,
+    epithet: m.epithet ? String(m.epithet) : null,
+    guest: m.guest || null,
     answers: m.answers || {}
   };
+}
 
-  MOMENTS.push(moment);
+function findMoment(id) {
+  return moments.find((x) => String(x.id) === String(id)) || null;
+}
 
-  // limit memory
-  if (MOMENTS.length > 500) MOMENTS = MOMENTS.slice(-500);
+function sortNewestFirst(arr) {
+  return arr.slice().sort((a, b) => (Number(b.createdAt || 0) - Number(a.createdAt || 0)));
+}
 
-  // notify master
-  await notifyMaster(formatMomentMessage(moment));
-
-  res.json({ ok: true, moment });
+/* =========================
+   ROUTES
+   ========================= */
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "THE MENU backend",
+    moments: moments.length
+  });
 });
 
-// get moments
 app.get("/moments", (req, res) => {
-  const limit = Math.min(Number(req.query.limit || 50), 500);
-  res.json({ ok: true, moments: MOMENTS.slice(-limit) });
+  const limit = Math.max(1, Math.min(MAX_LIMIT, Number(req.query.limit || 200)));
+  const list = sortNewestFirst(moments).slice(0, limit);
+
+  res.json({
+    ok: true,
+    moments: list
+  });
 });
 
-// set status (accepted starts the sand)
+app.post("/moment", (req, res) => {
+  try {
+    const incoming = req.body || {};
+    const m = normalizeMoment(incoming);
+
+    const exists = findMoment(m.id);
+    if (exists) {
+      return res.status(200).json({
+        ok: true,
+        moment: exists,
+        message: "Already exists"
+      });
+    }
+
+    if (!ALLOWED_STATUS.has(m.status)) {
+      m.status = "new";
+    }
+
+    moments.push(m);
+    writeFileSafe();
+
+    res.status(201).json({
+      ok: true,
+      moment: m
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: "createMoment error"
+    });
+  }
+});
+
 app.patch("/moment/:id/status", (req, res) => {
-  const id = String(req.params.id);
-  const { status } = req.body || {};
+  try {
+    const id = req.params.id;
+    const status = String(req.body?.status || "").trim();
 
-  if (!id || !status) {
-    return res.status(400).json({ ok: false, error: "bad_request" });
+    if (!ALLOWED_STATUS.has(status)) {
+      return res.status(400).json({ ok: false, error: "Invalid status" });
+    }
+
+    const m = findMoment(id);
+    if (!m) {
+      return res.status(404).json({ ok: false, error: "Moment not found" });
+    }
+
+    m.status = status;
+
+    if (status === "accepted" && !m.acceptedAt) {
+      m.acceptedAt = Date.now();
+    }
+
+    writeFileSafe();
+
+    res.json({ ok: true, moment: m });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "setStatus error" });
   }
-
-  const idx = MOMENTS.findIndex(m => String(m.id) === id);
-  if (idx === -1) return res.status(404).json({ ok: false, error: "not_found" });
-
-  const next = String(status);
-  MOMENTS[idx].status = next;
-
-  // IMPORTANT: start timer when accepted
-  if (next === "accepted" && !MOMENTS[idx].acceptedAt) {
-    MOMENTS[idx].acceptedAt = now();
-  }
-
-  res.json({ ok: true, moment: MOMENTS[idx] });
 });
 
-// set rating
 app.patch("/moment/:id/rating", (req, res) => {
-  const id = String(req.params.id);
-  const { rating } = req.body || {};
+  try {
+    const id = req.params.id;
+    const rating = String(req.body?.rating || "").trim();
 
-  if (!id || !rating) {
-    return res.status(400).json({ ok: false, error: "bad_request" });
+    if (!ALLOWED_RATING.has(rating)) {
+      return res.status(400).json({ ok: false, error: "Invalid rating" });
+    }
+
+    const m = findMoment(id);
+    if (!m) {
+      return res.status(404).json({ ok: false, error: "Moment not found" });
+    }
+
+    m.rating = rating;
+
+    writeFileSafe();
+
+    res.json({ ok: true, moment: m });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "setRating error" });
   }
-
-  const idx = MOMENTS.findIndex(m => String(m.id) === id);
-  if (idx === -1) return res.status(404).json({ ok: false, error: "not_found" });
-
-  MOMENTS[idx].rating = String(rating);
-  res.json({ ok: true, moment: MOMENTS[idx] });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server started on port", PORT));
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: "Not found" });
+});
+
+app.listen(PORT, () => {
+  console.log(`THE MENU backend running on port ${PORT}`);
+});
